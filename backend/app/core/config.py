@@ -57,7 +57,7 @@ class Settings(BaseSettings):
         / "yolov8n.pt"
     )
 
-    detection_confidence: float = 0.5
+    detection_confidence: float = 0.25
 
     # -------------------------------------------------
     # Processing

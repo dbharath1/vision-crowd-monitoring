@@ -66,9 +66,9 @@ class TrackingService:
             classes=[PERSON_CLASS_ID],
             tracker="bytetrack.yaml",
             persist=True,
+            imgsz=1280,
             verbose=False,
         )
-
         if not results:
             return {
                 "frame_id": frame_id,

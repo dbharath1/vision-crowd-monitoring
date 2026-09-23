@@ -1,5 +1,4 @@
 from pathlib import Path
-from uuid import uuid4
 
 from fastapi import UploadFile
 from sqlalchemy.orm import Session
@@ -22,15 +21,27 @@ class VideoService:
         db: Session,
     ) -> AnalysisSession:
 
+        # -----------------------------------------
+        # Validate filename
+        # -----------------------------------------
+
         if not file.filename:
             raise ValueError(
                 "Filename is missing."
             )
 
+        # -----------------------------------------
+        # Validate video format
+        # -----------------------------------------
+
         if not is_supported_video(file.filename):
             raise ValueError(
                 "Unsupported video format."
             )
+
+        # -----------------------------------------
+        # Create upload directory
+        # -----------------------------------------
 
         upload_directory = Path(
             settings.upload_dir
@@ -41,6 +52,10 @@ class VideoService:
             exist_ok=True,
         )
 
+        # -----------------------------------------
+        # Generate stored filename
+        # -----------------------------------------
+
         stored_filename = generate_stored_filename(
             file.filename
         )
@@ -49,11 +64,19 @@ class VideoService:
             upload_directory / stored_filename
         )
 
+        # -----------------------------------------
+        # Save uploaded video
+        # -----------------------------------------
+
         try:
+
             with video_path.open("wb") as output:
 
                 while True:
-                    chunk = await file.read(1024 * 1024)
+
+                    chunk = await file.read(
+                        1024 * 1024
+                    )
 
                     if not chunk:
                         break
@@ -61,36 +84,66 @@ class VideoService:
                     output.write(chunk)
 
         except Exception:
+
             if video_path.exists():
                 video_path.unlink()
 
             raise
 
+        # -----------------------------------------
+        # Extract video metadata
+        # -----------------------------------------
+
         try:
+
             metadata = extract_video_metadata(
                 str(video_path)
             )
 
         except Exception:
+
             if video_path.exists():
                 video_path.unlink()
 
             raise
 
+        # -----------------------------------------
+        # Create database session
+        # -----------------------------------------
+
         session = AnalysisSession(
-            id=uuid4().hex,
+
+            # IMPORTANT:
+            # id is INTEGER primary key,
+            # so let SQLite generate it.
             filename=file.filename,
-            stored_filename=stored_filename,
-            width=metadata.width,
-            height=metadata.height,
-            fps=metadata.fps,
-            frame_count=metadata.frame_count,
-            duration=metadata.duration,
+
+            # Required by AnalysisSession model
+            source_type="CCTV_VIDEO",
+
+            # Path used later by AnalysisService
+            source_path=str(video_path),
+
             status=ANALYSIS_PENDING,
+
+            width=metadata.width,
+
+            height=metadata.height,
+
+            fps=metadata.fps,
+
+            # Model uses total_frames
+            total_frames=metadata.frame_count,
         )
 
+        # -----------------------------------------
+        # Save to database
+        # -----------------------------------------
+
         db.add(session)
+
         db.commit()
+
         db.refresh(session)
 
         return session
