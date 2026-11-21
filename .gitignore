@@ -1,3 +1,20 @@
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Virtual environments
+venv/
+.venv/
+
+# Local database
+*.db
+
+# Environment variables
+.env
+
+# Uploaded and generated files
+backend/uploads/*
+backend/outputs/*
 backend/venv/
 backend.zip
 dataset.zip
