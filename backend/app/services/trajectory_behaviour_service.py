@@ -1,3 +1,4 @@
+import math
 from pathlib import Path
 
 import joblib
@@ -10,14 +11,21 @@ from app.core.constants import BEHAVIOUR_CLASSES
 
 class TrajectoryBehaviourService:
     """
-    Proposed trajectory-based behaviour analysis.
+    Trajectory and crowd-based behaviour analysis.
 
-    Unlike the baseline classifier, this feature vector uses
-    person-level trajectory and crowd-group information.
+    Behaviour classes:
 
-    No behaviour labels are manually assigned.
+        - Wandering
+        - Merging
+        - Standing Gathering
+        - Walking Gathering
+        - Dispersing
 
-    A trained model is required for actual behaviour prediction.
+    A trained Random Forest model can be used when available.
+
+    If no trained model is available, a temporal rule-based
+    classifier is used. The temporal classifier compares
+    consecutive crowd states to detect merging and dispersing.
     """
 
     FEATURE_NAMES = [
@@ -36,6 +44,14 @@ class TrajectoryBehaviourService:
         "moving_ratio",
         "stationary_ratio",
         "mean_group_speed",
+    ]
+
+    BEHAVIOUR_CLASSES = [
+        "Wandering",
+        "Merging",
+        "Standing Gathering",
+        "Walking Gathering",
+        "Dispersing",
     ]
 
     def __init__(
@@ -60,6 +76,41 @@ class TrajectoryBehaviourService:
 
         self.training_classes = []
 
+        # -----------------------------------------
+        # Temporal state
+        # -----------------------------------------
+
+        self.previous_state = None
+
+        self.previous_behaviour = None
+
+        self.behaviour_streak = 0
+
+        # Number of consecutive frames required
+        # before changing the reported behaviour.
+        self.min_behaviour_streak = 2
+
+        # Relative spatial change required to classify
+        # merging/dispersing.
+        self.spatial_change_threshold = 0.08
+
+    # =====================================================
+    # RESET TEMPORAL STATE
+    # =====================================================
+
+    def reset_temporal_state(self):
+        """
+        Reset all state associated with the previous frame.
+
+        Must be called before starting a new video/session.
+        """
+
+        self.previous_state = None
+
+        self.previous_behaviour = None
+
+        self.behaviour_streak = 0
+
     # =====================================================
     # FEATURE EXTRACTION
     # =====================================================
@@ -70,10 +121,6 @@ class TrajectoryBehaviourService:
         movement_results: dict[int, dict],
         groups_result: dict,
     ) -> dict:
-        """
-        Extract trajectory and crowd-group features
-        from the current analysis state.
-        """
 
         if not tracks:
             return {
@@ -99,11 +146,17 @@ class TrajectoryBehaviourService:
                 continue
 
             if movement.get("speed") is not None:
+
                 speeds.append(
-                    float(movement["speed"])
+                    float(
+                        movement["speed"]
+                    )
                 )
 
-            if movement.get("displacement") is not None:
+            if movement.get(
+                "displacement"
+            ) is not None:
+
                 displacements.append(
                     float(
                         movement["displacement"]
@@ -118,11 +171,14 @@ class TrajectoryBehaviourService:
                 None,
                 "UNKNOWN",
             ):
-                directions.append(direction)
 
-        # -------------------------------------------------
+                directions.append(
+                    direction
+                )
+
+        # -----------------------------------------
         # Movement statistics
-        # -------------------------------------------------
+        # -----------------------------------------
 
         mean_speed = (
             float(np.mean(speeds))
@@ -148,9 +204,9 @@ class TrajectoryBehaviourService:
             else 0.0
         )
 
-        # -------------------------------------------------
+        # -----------------------------------------
         # Direction statistics
-        # -------------------------------------------------
+        # -----------------------------------------
 
         direction_diversity = (
             len(set(directions))
@@ -165,9 +221,9 @@ class TrajectoryBehaviourService:
             )
         )
 
-        # -------------------------------------------------
-        # Spatial trajectory spread
-        # -------------------------------------------------
+        # -----------------------------------------
+        # Current spatial spread
+        # -----------------------------------------
 
         centers = np.array(
             [
@@ -183,9 +239,9 @@ class TrajectoryBehaviourService:
             )
         )
 
-        # -------------------------------------------------
+        # -----------------------------------------
         # Group features
-        # -------------------------------------------------
+        # -----------------------------------------
 
         groups = groups_result.get(
             "groups",
@@ -217,9 +273,11 @@ class TrajectoryBehaviourService:
             else 0.0
         )
 
-        noise_track_ids = groups_result.get(
-            "noise_track_ids",
-            [],
+        noise_track_ids = (
+            groups_result.get(
+                "noise_track_ids",
+                [],
+            )
         )
 
         noise_ratio = (
@@ -229,9 +287,9 @@ class TrajectoryBehaviourService:
             else 0.0
         )
 
-        # -------------------------------------------------
-        # Movement ratio
-        # -------------------------------------------------
+        # -----------------------------------------
+        # Movement ratios
+        # -----------------------------------------
 
         moving_count = 0
         stationary_count = 0
@@ -242,49 +300,56 @@ class TrajectoryBehaviourService:
                 track["track_id"]
             )
 
-            movement = movement_results.get(
-                track_id
+            movement = (
+                movement_results.get(
+                    track_id
+                )
             )
 
             if not movement:
                 continue
 
-            if movement.get(
+            direction = movement.get(
                 "direction"
-            ) == "STATIONARY":
+            )
+
+            if direction == "STATIONARY":
 
                 stationary_count += 1
 
-            else:
+            elif direction != "UNKNOWN":
+
                 moving_count += 1
 
-        total_movement_observations = (
-            moving_count + stationary_count
+        total_observations = (
+            moving_count
+            + stationary_count
         )
 
         moving_ratio = (
             moving_count
-            / total_movement_observations
-            if total_movement_observations
+            / total_observations
+            if total_observations
             else 0.0
         )
 
         stationary_ratio = (
             stationary_count
-            / total_movement_observations
-            if total_movement_observations
+            / total_observations
+            if total_observations
             else 0.0
         )
 
-        # -------------------------------------------------
+        # -----------------------------------------
         # Group movement
-        # -------------------------------------------------
+        # -----------------------------------------
 
         group_speeds = [
             group["average_speed"]
             for group in groups
-            if group.get("average_speed")
-            is not None
+            if group.get(
+                "average_speed"
+            ) is not None
         ]
 
         mean_group_speed = (
@@ -296,23 +361,45 @@ class TrajectoryBehaviourService:
         return {
             "mean_speed": mean_speed,
             "speed_std": speed_std,
-            "mean_displacement": mean_displacement,
-            "displacement_std": displacement_std,
-            "direction_diversity": direction_diversity,
-            "direction_consistency": direction_consistency,
-            "trajectory_spread": trajectory_spread,
-            "group_count": float(group_count),
+            "mean_displacement": (
+                mean_displacement
+            ),
+            "displacement_std": (
+                displacement_std
+            ),
+            "direction_diversity": (
+                direction_diversity
+            ),
+            "direction_consistency": (
+                direction_consistency
+            ),
+            "trajectory_spread": (
+                trajectory_spread
+            ),
+            "group_count": float(
+                group_count
+            ),
             "largest_group_size": float(
                 largest_group_size
             ),
-            "group_size_mean": group_size_mean,
-            "group_size_std": group_size_std,
-            "noise_ratio": float(noise_ratio),
-            "moving_ratio": float(moving_ratio),
+            "group_size_mean": (
+                group_size_mean
+            ),
+            "group_size_std": (
+                group_size_std
+            ),
+            "noise_ratio": float(
+                noise_ratio
+            ),
+            "moving_ratio": float(
+                moving_ratio
+            ),
             "stationary_ratio": float(
                 stationary_ratio
             ),
-            "mean_group_speed": mean_group_speed,
+            "mean_group_speed": (
+                mean_group_speed
+            ),
         }
 
     # =====================================================
@@ -330,8 +417,13 @@ class TrajectoryBehaviourService:
         counts = {}
 
         for direction in directions:
+
             counts[direction] = (
-                counts.get(direction, 0) + 1
+                counts.get(
+                    direction,
+                    0,
+                )
+                + 1
             )
 
         maximum_count = max(
@@ -362,7 +454,11 @@ class TrajectoryBehaviourService:
 
         distances = np.sqrt(
             np.sum(
-                (centers - centroid) ** 2,
+                (
+                    centers
+                    - centroid
+                )
+                ** 2,
                 axis=1,
             )
         )
@@ -394,6 +490,570 @@ class TrajectoryBehaviourService:
         )
 
     # =====================================================
+    # TEMPORAL STATE
+    # =====================================================
+
+    def _build_temporal_state(
+        self,
+        tracks: list[dict],
+        groups_result: dict,
+        features: dict,
+    ) -> dict:
+
+        centers = [
+            [
+                float(track["center"][0]),
+                float(track["center"][1]),
+            ]
+            for track in tracks
+        ]
+
+        groups = groups_result.get(
+            "groups",
+            [],
+        )
+
+        group_centroids = [
+            [
+                float(group["centroid"][0]),
+                float(group["centroid"][1]),
+            ]
+            for group in groups
+        ]
+
+        group_sizes = [
+            int(group["member_count"])
+            for group in groups
+        ]
+
+        return {
+            "person_count": len(tracks),
+
+            "centers": centers,
+
+            "group_centroids": (
+                group_centroids
+            ),
+
+            "group_sizes": group_sizes,
+
+            "group_count": len(groups),
+
+            "spread": float(
+                features.get(
+                    "trajectory_spread",
+                    0.0,
+                )
+            ),
+
+            "moving_ratio": float(
+                features.get(
+                    "moving_ratio",
+                    0.0,
+                )
+            ),
+
+            "stationary_ratio": float(
+                features.get(
+                    "stationary_ratio",
+                    0.0,
+                )
+            ),
+
+            "mean_speed": float(
+                features.get(
+                    "mean_speed",
+                    0.0,
+                )
+            ),
+
+            "direction_diversity": float(
+                features.get(
+                    "direction_diversity",
+                    0.0,
+                )
+            ),
+
+            "direction_consistency": float(
+                features.get(
+                    "direction_consistency",
+                    0.0,
+                )
+            ),
+        }
+
+    # =====================================================
+    # GROUP CENTROID DISTANCE
+    # =====================================================
+
+    @staticmethod
+    def _average_group_distance(
+        centroids: list[list[float]],
+    ) -> float:
+
+        if len(centroids) < 2:
+            return 0.0
+
+        distances = []
+
+        for i in range(
+            len(centroids)
+        ):
+
+            for j in range(
+                i + 1,
+                len(centroids),
+            ):
+
+                dx = (
+                    centroids[i][0]
+                    - centroids[j][0]
+                )
+
+                dy = (
+                    centroids[i][1]
+                    - centroids[j][1]
+                )
+
+                distance = math.sqrt(
+                    (dx * dx)
+                    + (dy * dy)
+                )
+
+                distances.append(
+                    distance
+                )
+
+        if not distances:
+            return 0.0
+
+        return float(
+            np.mean(distances)
+        )
+
+    # =====================================================
+    # PERSON SPREAD CHANGE
+    # =====================================================
+
+    def _calculate_spread_change(
+        self,
+        previous_state: dict,
+        current_state: dict,
+    ) -> float | None:
+
+        previous_spread = float(
+            previous_state.get(
+                "spread",
+                0.0,
+            )
+        )
+
+        current_spread = float(
+            current_state.get(
+                "spread",
+                0.0,
+            )
+        )
+
+        if previous_spread <= 1.0:
+            return None
+
+        return (
+            current_spread
+            - previous_spread
+        ) / previous_spread
+
+    # =====================================================
+    # TEMPORAL BEHAVIOUR
+    # =====================================================
+
+    def _classify_temporal(
+        self,
+        tracks: list[dict],
+        movement_results: dict[int, dict],
+        groups_result: dict,
+        features: dict,
+    ) -> tuple[str, str]:
+
+        if not tracks:
+
+            return (
+                "Wandering",
+                "No active crowd group was detected.",
+            )
+
+        current_state = (
+            self._build_temporal_state(
+                tracks=tracks,
+                groups_result=groups_result,
+                features=features,
+            )
+        )
+
+        previous_state = (
+            self.previous_state
+        )
+
+        groups = groups_result.get(
+            "groups",
+            [],
+        )
+
+        group_count = len(groups)
+
+        largest_group_size = (
+            max(
+                (
+                    int(
+                        group[
+                            "member_count"
+                        ]
+                    )
+                    for group in groups
+                ),
+                default=0,
+            )
+        )
+
+        moving_ratio = features.get(
+            "moving_ratio",
+            0.0,
+        )
+
+        stationary_ratio = features.get(
+            "stationary_ratio",
+            0.0,
+        )
+
+        spread = features.get(
+            "trajectory_spread",
+            0.0,
+        )
+
+        direction_diversity = features.get(
+            "direction_diversity",
+            0.0,
+        )
+
+        direction_consistency = features.get(
+            "direction_consistency",
+            0.0,
+        )
+
+        # -----------------------------------------
+        # First frame
+        # -----------------------------------------
+
+        if previous_state is None:
+
+            self.previous_state = (
+                current_state
+            )
+
+            if (
+                largest_group_size >= 2
+                and stationary_ratio >= 0.60
+            ):
+
+                return (
+                    "Standing Gathering",
+                    "People are spatially grouped "
+                    "with predominantly stationary movement.",
+                )
+
+            if (
+                largest_group_size >= 2
+                and moving_ratio >= 0.60
+            ):
+
+                return (
+                    "Walking Gathering",
+                    "People are spatially grouped "
+                    "with predominantly moving members.",
+                )
+
+            return (
+                "Wandering",
+                "No strong gathering pattern is "
+                "present in the current frame.",
+            )
+
+        # -----------------------------------------
+        # Detect merging / dispersing
+        # -----------------------------------------
+
+        previous_group_count = (
+            previous_state.get(
+                "group_count",
+                0,
+            )
+        )
+
+        previous_group_distance = (
+            self._average_group_distance(
+                previous_state.get(
+                    "group_centroids",
+                    [],
+                )
+            )
+        )
+
+        current_group_distance = (
+            self._average_group_distance(
+                current_state.get(
+                    "group_centroids",
+                    [],
+                )
+            )
+        )
+
+        # Multiple groups moving closer.
+        if (
+            previous_group_count >= 2
+            and group_count >= 1
+            and current_group_distance > 0
+        ):
+
+            if previous_group_distance > 0:
+
+                relative_change = (
+                    (
+                        current_group_distance
+                        - previous_group_distance
+                    )
+                    / previous_group_distance
+                )
+
+                if (
+                    relative_change
+                    <= -self.spatial_change_threshold
+                ):
+
+                    return (
+                        "Merging",
+                        "Spatial separation between "
+                        "crowd groups is decreasing.",
+                    )
+
+        # Multiple groups becoming more separated.
+        if (
+            previous_group_count >= 1
+            and group_count >= 2
+            and previous_group_distance > 0
+        ):
+
+            relative_change = (
+                (
+                    current_group_distance
+                    - previous_group_distance
+                )
+                / previous_group_distance
+            )
+
+            if (
+                relative_change
+                >= self.spatial_change_threshold
+            ):
+
+                return (
+                    "Dispersing",
+                    "Spatial separation between "
+                    "crowd groups is increasing.",
+                )
+
+        # -----------------------------------------
+        # Person-level spread change
+        #
+        # Useful when DBSCAN temporarily produces
+        # no group because of noise or small crowd
+        # size.
+        # -----------------------------------------
+
+        spread_change = (
+            self._calculate_spread_change(
+                previous_state,
+                current_state,
+            )
+        )
+
+        if spread_change is not None:
+
+            if (
+                spread_change
+                <= -self.spatial_change_threshold
+                and moving_ratio >= 0.50
+                and len(tracks) >= 2
+            ):
+
+                return (
+                    "Merging",
+                    "Overall crowd spatial spread "
+                    "is decreasing while people are moving.",
+                )
+
+            if (
+                spread_change
+                >= self.spatial_change_threshold
+                and moving_ratio >= 0.40
+                and len(tracks) >= 2
+            ):
+
+                return (
+                    "Dispersing",
+                    "Overall crowd spatial spread "
+                    "is increasing while people are moving.",
+                )
+
+        # -----------------------------------------
+        # Standing gathering
+        # -----------------------------------------
+
+        if (
+            largest_group_size >= 2
+            and stationary_ratio >= 0.60
+            and spread <= 250.0
+        ):
+
+            return (
+                "Standing Gathering",
+                "People are spatially grouped "
+                "and most members are stationary.",
+            )
+
+        # -----------------------------------------
+        # Walking gathering
+        # -----------------------------------------
+
+        if (
+            largest_group_size >= 2
+            and moving_ratio >= 0.60
+            and spread <= 300.0
+        ):
+
+            return (
+                "Walking Gathering",
+                "People are spatially grouped "
+                "and most members are moving.",
+            )
+
+        # -----------------------------------------
+        # Wandering
+        # -----------------------------------------
+
+        if (
+            direction_diversity >= 0.50
+            and direction_consistency <= 0.60
+        ):
+
+            return (
+                "Wandering",
+                "Movement directions are diverse "
+                "with no strong common direction.",
+            )
+
+        if (
+            group_count == 0
+            and len(tracks) <= 2
+        ):
+
+            return (
+                "Wandering",
+                "No stable crowd grouping is detected.",
+            )
+
+        # -----------------------------------------
+        # Conservative fallback
+        # -----------------------------------------
+
+        if (
+            moving_ratio >= 0.50
+            and largest_group_size >= 2
+        ):
+
+            return (
+                "Walking Gathering",
+                "A moving spatial group is detected.",
+            )
+
+        if (
+            stationary_ratio >= 0.50
+            and largest_group_size >= 2
+        ):
+
+            return (
+                "Standing Gathering",
+                "A mostly stationary spatial group "
+                "is detected.",
+            )
+
+        return (
+            "Wandering",
+            "No stronger temporal behaviour pattern "
+            "was detected.",
+        )
+
+    # =====================================================
+    # TEMPORAL PREDICTION
+    # =====================================================
+
+    def predict_temporal(
+        self,
+        tracks: list[dict],
+        movement_results: dict[int, dict],
+        groups_result: dict,
+        features: dict,
+    ) -> dict:
+
+        behaviour, reason = (
+            self._classify_temporal(
+                tracks=tracks,
+                movement_results=movement_results,
+                groups_result=groups_result,
+                features=features,
+            )
+        )
+
+        # -----------------------------------------
+        # Temporal smoothing
+        # -----------------------------------------
+
+        if (
+            self.previous_behaviour
+            == behaviour
+        ):
+
+            self.behaviour_streak += 1
+
+        else:
+
+            self.previous_behaviour = (
+                behaviour
+            )
+
+            self.behaviour_streak = 1
+
+        self.previous_state = (
+            self._build_temporal_state(
+                tracks=tracks,
+                groups_result=groups_result,
+                features=features,
+            )
+        )
+
+        return {
+            "status": "PREDICTED",
+            "behaviour": behaviour,
+            "confidence": None,
+            "probabilities": {},
+            "reason": reason,
+            "method": "TEMPORAL_RULE_BASED",
+            "stable": (
+                self.behaviour_streak
+                >= self.min_behaviour_streak
+            ),
+        }
+
+    # =====================================================
     # TRAIN
     # =====================================================
 
@@ -414,6 +1074,7 @@ class TrajectoryBehaviourService:
             )
 
         if len(feature_records) != len(labels):
+
             raise ValueError(
                 "Number of feature records and labels "
                 "must be equal."
@@ -426,6 +1087,7 @@ class TrajectoryBehaviourService:
         ]
 
         if invalid_labels:
+
             raise ValueError(
                 "Unknown behaviour labels: "
                 f"{invalid_labels}"
@@ -449,12 +1111,16 @@ class TrajectoryBehaviourService:
         )
 
         if len(unique_classes) < 2:
+
             raise ValueError(
                 "Training requires at least "
                 "two behaviour classes."
             )
 
-        self.model.fit(X, y)
+        self.model.fit(
+            X,
+            y,
+        )
 
         self.is_trained = True
 
@@ -463,6 +1129,7 @@ class TrajectoryBehaviourService:
         )
 
         if self.model_path:
+
             self.model_path.parent.mkdir(
                 parents=True,
                 exist_ok=True,
@@ -487,12 +1154,14 @@ class TrajectoryBehaviourService:
     def load(self) -> dict:
 
         if self.model_path is None:
+
             raise ValueError(
                 "No trajectory behaviour model "
                 "path configured."
             )
 
         if not self.model_path.exists():
+
             raise FileNotFoundError(
                 "Trajectory behaviour model not found: "
                 f"{self.model_path}"
@@ -508,6 +1177,7 @@ class TrajectoryBehaviourService:
             self.model,
             "classes_",
         ):
+
             self.training_classes = [
                 str(value)
                 for value in self.model.classes_
@@ -519,7 +1189,7 @@ class TrajectoryBehaviourService:
         }
 
     # =====================================================
-    # PREDICT
+    # PREDICT USING TRAINED MODEL
     # =====================================================
 
     def predict(
@@ -528,6 +1198,7 @@ class TrajectoryBehaviourService:
     ) -> dict:
 
         if not self.is_trained:
+
             return {
                 "status": "NOT_EVALUATED",
                 "behaviour": None,
@@ -540,13 +1211,18 @@ class TrajectoryBehaviourService:
                 ),
             }
 
-        vector = self.to_vector(
-            features
-        ).reshape(1, -1)
+        vector = (
+            self.to_vector(
+                features
+            )
+            .reshape(1, -1)
+        )
 
-        prediction = self.model.predict(
-            vector
-        )[0]
+        prediction = (
+            self.model.predict(
+                vector
+            )[0]
+        )
 
         probabilities = {}
 
@@ -561,25 +1237,37 @@ class TrajectoryBehaviourService:
                 )[0]
             )
 
-            classes = self.model.classes_
+            classes = (
+                self.model.classes_
+            )
 
-            for class_name, probability in zip(
+            for (
+                class_name,
+                probability,
+            ) in zip(
                 classes,
                 values,
             ):
+
                 probabilities[
                     str(class_name)
-                ] = float(probability)
+                ] = float(
+                    probability
+                )
 
         confidence = (
-            max(probabilities.values())
+            max(
+                probabilities.values()
+            )
             if probabilities
             else None
         )
 
         return {
             "status": "PREDICTED",
-            "behaviour": str(prediction),
+            "behaviour": str(
+                prediction
+            ),
             "confidence": (
                 float(confidence)
                 if confidence is not None
@@ -587,4 +1275,5 @@ class TrajectoryBehaviourService:
             ),
             "probabilities": probabilities,
             "reason": None,
+            "method": "RANDOM_FOREST",
         }

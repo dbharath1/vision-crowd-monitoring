@@ -1,43 +1,22 @@
+
 from app.core.config import settings
 
 
 class CongestionService:
     """
-    Dynamic congestion assessment.
+    Application-level crowd congestion assessment.
 
-    Congestion is calculated from:
-    - crowd density
-    - average movement speed
-    - stationary-person ratio
-
-    Thresholds are configurable through settings.
-    No congestion result is hard-coded.
+    Uses density, movement, stationary ratio and
+    DBSCAN crowd-group concentration.
     """
 
     def __init__(self):
-        self.moderate_density = (
-            settings.congestion_density_moderate
-        )
+        self.moderate_density = settings.congestion_density_moderate
+        self.high_density = settings.congestion_density_high
+        self.low_speed = settings.congestion_speed_low
 
-        self.high_density = (
-            settings.congestion_density_high
-        )
-
-        self.low_speed = (
-            settings.congestion_speed_low
-        )
-
-        self.moderate_score = (
-            settings.congestion_moderate_score
-        )
-
-        self.high_score = (
-            settings.congestion_high_score
-        )
-
-    # =====================================================
-    # MAIN CONGESTION CALCULATION
-    # =====================================================
+        self.moderate_score = settings.congestion_moderate_score
+        self.high_score = settings.congestion_high_score
 
     def calculate(
         self,
@@ -45,186 +24,92 @@ class CongestionService:
         movement_summary: dict,
         groups: list[dict],
     ) -> dict:
-        """
-        Calculate congestion dynamically for the current frame.
-        """
 
-        density = float(
-            density_result.get("density", 0.0) or 0.0
-        )
+        density = float(density_result.get("density", 0.0) or 0.0)
+        person_count = int(density_result.get("person_count", 0) or 0)
 
-        person_count = int(
-            density_result.get("person_count", 0) or 0
-        )
+        average_speed = movement_summary.get("average_speed")
 
-        average_speed = movement_summary.get(
-            "average_speed"
-        )
+        moving = int(movement_summary.get("moving_persons", 0) or 0)
+        stationary = int(movement_summary.get("stationary_persons", 0) or 0)
+        tracked = moving + stationary
 
-        moving_persons = int(
-            movement_summary.get(
-                "moving_persons", 0
-            )
-            or 0
-        )
+        # 1. Density component
+        density_range = self.high_density - self.moderate_density
 
-        stationary_persons = int(
-            movement_summary.get(
-                "stationary_persons", 0
-            )
-            or 0
-        )
-
-        total_movement_persons = (
-            moving_persons + stationary_persons
-        )
-
-        # -------------------------------------------------
-        # 1. Density score
-        # -------------------------------------------------
-
-        if density <= self.moderate_density:
-            density_score = 0.0
-
-        elif density >= self.high_density:
-            density_score = 1.0
-
-        else:
-            density_range = (
-                self.high_density
-                - self.moderate_density
-            )
-
-            density_score = (
-                density
-                - self.moderate_density
-            ) / density_range
+        if density_range <= 0:
+            raise ValueError("High density must exceed moderate density.")
 
         density_score = self._clamp(
-            density_score
+            (density - self.moderate_density) / density_range
         )
 
-        # -------------------------------------------------
-        # 2. Movement / low-speed score
-        # -------------------------------------------------
-
+        # 2. Slow movement component
+        # High speed is not automatically treated as congestion.
         if average_speed is None:
             movement_score = 0.0
-        elif average_speed <= self.low_speed:
-            movement_score = 1.0
         else:
-            movement_score = max(
-                0.0,
-                1.0
-                - (
-                    average_speed
-                    / (self.low_speed * 3.0)
-                ),
+            movement_score = self._clamp(
+                1.0 - (float(average_speed) / (self.low_speed * 3.0))
             )
 
-        movement_score = self._clamp(
-            movement_score
+        # 3. Stationary-person component
+        stationary_score = (
+            self._clamp(stationary / tracked)
+            if tracked > 0 else 0.0
         )
 
-        # -------------------------------------------------
-        # 3. Stationary-person score
-        # -------------------------------------------------
-
-        if total_movement_persons > 0:
-            stationary_ratio = (
-                stationary_persons
-                / total_movement_persons
-            )
-        else:
-            stationary_ratio = 0.0
-
-        stationary_score = self._clamp(
-            stationary_ratio
+        # 4. Crowd-group concentration
+        largest_group = max(
+            (int(group.get("member_count", 0)) for group in groups),
+            default=0,
         )
 
-        # -------------------------------------------------
-        # 4. Combined congestion score
-        # -------------------------------------------------
-        #
-        # Density receives the largest contribution because
-        # congestion fundamentally depends on crowding.
-        #
-        # Movement and stationary behaviour provide
-        # additional evidence.
-        # -------------------------------------------------
-
-        score = (
-            0.60 * density_score
-            + 0.25 * movement_score
-            + 0.15 * stationary_score
+        group_score = (
+            self._clamp(largest_group / person_count)
+            if person_count > 0 else 0.0
         )
 
-        score = self._clamp(score)
+        # 5. Combined score
+        score = self._clamp(
+            0.50 * density_score
+            + 0.15 * movement_score
+            + 0.10 * stationary_score
+            + 0.25 * group_score
+        )
 
-        # -------------------------------------------------
-        # 5. Congestion level
-        # -------------------------------------------------
-
+        # 6. Congestion classification
         if score >= self.high_score:
             level = "HIGH"
-
         elif score >= self.moderate_score:
             level = "MODERATE"
-
         else:
             level = "NORMAL"
-
-        # -------------------------------------------------
-        # 6. Return complete result
-        # -------------------------------------------------
 
         return {
             "level": level,
             "score": float(score),
-
             "person_count": person_count,
             "density": density,
-
             "average_speed": (
                 float(average_speed)
-                if average_speed is not None
-                else None
+                if average_speed is not None else None
             ),
-
-            "moving_persons": moving_persons,
-            "stationary_persons": stationary_persons,
-
-            "stationary_ratio": float(
-                stationary_ratio
+            "moving_persons": moving,
+            "stationary_persons": stationary,
+            "stationary_ratio": (
+                stationary / tracked if tracked > 0 else 0.0
             ),
-
             "group_count": len(groups),
-
+            "largest_group_size": largest_group,
             "components": {
-                "density_score": float(
-                    density_score
-                ),
-                "movement_score": float(
-                    movement_score
-                ),
-                "stationary_score": float(
-                    stationary_score
-                ),
+                "density_score": float(density_score),
+                "movement_score": float(movement_score),
+                "stationary_score": float(stationary_score),
+                "group_score": float(group_score),
             },
         }
 
-    # =====================================================
-    # UTILITY
-    # =====================================================
-
     @staticmethod
-    def _clamp(
-        value: float,
-        minimum: float = 0.0,
-        maximum: float = 1.0,
-    ) -> float:
-
-        return max(
-            minimum,
-            min(maximum, float(value)),
-        )
+    def _clamp(value: float) -> float:
+        return max(0.0, min(1.0, float(value)))

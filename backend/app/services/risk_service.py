@@ -277,7 +277,7 @@ class RiskService:
                 "components",
                 {},
             ).get(
-                "density",
+                "density_score",
                 0.0,
             )
         )

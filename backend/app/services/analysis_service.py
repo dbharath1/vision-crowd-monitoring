@@ -233,6 +233,8 @@ class AnalysisService:
 
             self.trajectory_service.clear()
 
+            self.trajectory_behaviour_service.reset_temporal_state()
+
             self.alert_service.clear()
 
             # =====================================
@@ -312,9 +314,15 @@ class AnalysisService:
                 # 4. MOVEMENT
                 # =================================
 
+                active_track_ids = {
+                    int(track["track_id"])
+                    for track in tracks
+                }
+
                 movement_results = (
                     movement_service.calculate_all(
-                        trajectories
+                        trajectories=trajectories,
+                        active_track_ids=active_track_ids,
                     )
                 )
 
@@ -390,9 +398,16 @@ class AnalysisService:
                 )
 
                 # =================================
-                # SELECT BEHAVIOUR RESULT
+                # 8B. TEMPORAL BEHAVIOUR FALLBACK
                 # =================================
-
+                #
+                # If a trained trajectory model exists,
+                # use its prediction.
+                #
+                # Otherwise use the temporal rule-based
+                # classifier based on the current and
+                # previous crowd states.
+                # =================================
                 if (
                     trajectory_behaviour["status"]
                     != "NOT_EVALUATED"
@@ -405,9 +420,16 @@ class AnalysisService:
                 else:
 
                     behaviour_result = (
-                        baseline_behaviour
+                        self.trajectory_behaviour_service
+                        .predict_temporal(
+                            tracks=tracks,
+                            movement_results=(
+                                movement_results
+                            ),
+                            groups_result=group_result,
+                            features=trajectory_features,
+                        )
                     )
-
                 # =================================
                 # 9. CONGESTION
                 # =================================
@@ -467,6 +489,24 @@ class AnalysisService:
                         ),
                     )
                 )
+                print("\n========== CROWDWATCH ALERT DEBUG ==========")
+
+                print("Frame:", frame_id)
+
+                print("Congestion score:", congestion_result.get("score"))
+                print("Congestion level:", congestion_result.get("level"))
+
+                print("Risk score:", risk_result.get("score"))
+                print("Risk level:", risk_result.get("level"))
+
+                print("Generated alerts:", alerts)
+                print("Congestion components:",congestion_result.get("components"))
+                print("Density:",density_result.get("density"))
+
+                print("Person count:",density_result.get("person_count"))
+                print("Group count:",len(groups))
+                print("Largest group:",max((g.get("member_count", 0) for g in groups),default=0))
+                print("============================================\n")
 
                 # =================================
                 # 12. SAVE FRAME ANALYSIS

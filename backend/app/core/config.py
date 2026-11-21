@@ -83,15 +83,14 @@ class Settings(BaseSettings):
     # -------------------------------------------------
     # Congestion
     # -------------------------------------------------
-
+    congestion_movement_weight: float = 0.15
+    congestion_group_weight: float = 0.25
     congestion_density_moderate: float = 0.00002
 
     congestion_density_high: float = 0.00005
 
     congestion_speed_low: float = 5.0
-
-    congestion_moderate_score: float = 0.40
-
+    congestion_moderate_score: float = 0.20
     congestion_high_score: float = 0.70
 
     # -------------------------------------------------
